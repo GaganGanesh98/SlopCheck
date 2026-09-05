@@ -122,8 +122,14 @@ python3 -m slopcheck.cli report.txt --repo ./target --ref curl-8_11_0 --json
 python3 -m slopcheck.cli report.txt --repo ./target --claims-only
 ```
 
-Exit code is `1` when anything is contradicted, so it can gate a CI job. That
-is a signal for a human to look — never grounds to close a report.
+**The exit code reports whether the tool ran, not whether the report is
+suspect.** `0` means it produced a report, `2` means it could not run (bad
+`--ref`, missing `--repo`). Contradictions do not affect it.
+
+That is deliberate, and it is a breaking change from earlier versions which
+exited `1` on any contradiction. `--fail-on-contradiction` restores the old
+behaviour opt-in. See [There is no usable threshold](#there-is-no-usable-threshold)
+for why you probably should not use it.
 
 **Use a full clone.** On a blobless clone (`--filter=blob:none`) every
 cross-ref probe lazily refetches blobs over the network and the run appears to
@@ -229,10 +235,39 @@ rate was never the goal; separation is.
 Nothing beyond the snippet fix pays for itself: the remaining options buy a
 few points of precision by destroying slop detection.
 
+### There is no usable threshold
+
+The obvious response to a 57.9% false-contradiction rate is to stop gating on
+"any contradiction" and pick a better threshold. That is testable, so it was
+tested rather than argued about. Sweeping every threshold on three metrics
+across all 557 reports:
+
+| metric | best threshold | genuine FP | slop caught | Youden J |
+|---|---|---|---|---|
+| contradiction count | ≥ 1 | 57.9% | 73.5% | **0.155** |
+| contradicted / consistent | ≥ 0.5 | 29.4% | 44.9% | **0.155** |
+| contradicted / claims | ≥ 0.05 | 54.8% | 67.3% | 0.126 |
+
+Youden's J is `sensitivity + specificity - 1`: **J = 0 is a coin flip, J = 1 is
+perfect.** The best result anywhere in the sweep is 0.155.
+
+Every operating point with a false-alarm rate a maintainer would tolerate is
+worthless:
+
+```
+contradiction count >= 15     genuine FP  6.3%    slop caught  2.0%
+contradicted/claims >= 0.5    genuine FP  7.9%    slop caught  8.2%
+```
+
+Get the false alarms down to something honest and you catch roughly one slop
+report in twelve. The aggregate signal is not in the data, so this is not a
+tuning problem and no threshold fixes it.
+
 ### What this means
 
-The binary gate is still the wrong product, and the exit code should not be
-read as a verdict. 57.9% is a narrower hole than 73.0%, not a closed one. What survives is what the design notes said before the
+The binary gate is dead, and not as a matter of taste — the sweep above
+settles it. 57.9% is a narrower hole than 73.0%, not a closed one, and no
+threshold closes it. What survives is what the design notes said before the
 implementation drifted: **an annotator, not a gate.** Individual findings are
 frequently correct and useful — *this symbol is absent at HEAD but present at
 8.12.1; this file moved here; this line is past end-of-file* — even where the
