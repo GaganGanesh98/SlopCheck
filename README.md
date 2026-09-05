@@ -37,6 +37,12 @@ and moved to `projects/` in `3ee1d3b573` ("tidy-up: merge root `packages`
 directory into `projects`"). Checking against HEAD alone called a truthful
 line fabricated. A tool that does that to a reporter deserves to be ignored.
 
+**Before reading further: measured across all 557 publicly disclosed curl
+reports, this tool contradicts 73% of confirmed vulnerabilities.** It does not
+work as a gate. See [Measured behaviour](#measured-behaviour) — that section is
+the honest summary of what this does and does not do, and the example above is
+an illustration of the mechanism, not a result.
+
 ---
 
 ## Why this exists
@@ -132,110 +138,102 @@ re-run against the right version. Set `--ref` to what the reporter named.
 
 ## Measured behaviour
 
-Six real curl reports: four from the maintainers' own published archive of
-rejected AI slop, two genuine (one a resolved CVE). Re-measured against a full
-clone of curl at `8071d7adc2` (HEAD, 2026-09-05), no `--ref` given.
+**The headline result is negative.** Read this section before the rest of the
+README; an earlier version of it reported six hand-picked reports and showed
+zero contradictions on the two genuine ones. That was a demo, not evidence, and
+it was unrepresentative.
 
-| report | label | contradicted | consistent | uncheckable | time |
-|---|---|---|---|---|---|
-| [2871792](https://hackerone.com/reports/2871792) | slop | 1 | 0 | 0 | 1.0s |
-| [3125832](https://hackerone.com/reports/3125832) | slop | 16 | 2 | 5 | 8.2s |
-| [3400831](https://hackerone.com/reports/3400831) | slop | 1 | 2 | 4 | 2.0s |
-| [3418528](https://hackerone.com/reports/3418528) | slop | 7 | 0 | 2 | 1.9s |
-| [3969255](https://hackerone.com/reports/3969255) | **genuine (CVE)** | **0** | 19 | 7 | 2.2s |
-| [3973228](https://hackerone.com/reports/3973228) | **genuine** | **0** | 14 | 1 | 0.8s |
+`fetch_curl_corpus.py` builds a labelled corpus from HackerOne's public
+disclosures: **557 curl reports — 126 confirmed vulnerabilities (`resolved`),
+49 in the maintainers' published AI-slop archive, 382 unlabelled.**
+`evaluate.py` scores all of them against one ref.
 
-Zero contradictions on the genuine reports. That result is only trustworthy
-because of what sits behind it, which is worth stating plainly: it depends
-entirely on `recent_tags()` returning a correct list of release tags, and that
-function shipped with three separate defects, each of which silently disabled
-the stale-`--ref` downgrade or made it fire for the wrong reason.
-
-1. A de-duplication key of `tag.rstrip("0123456789_-.")` collapsed every
-   `curl-*` tag into one family, stopping the list at two entries.
-2. Sorting by date put curl's three release candidates for 8.22.0 at the top:
-   one point in history wearing four hats.
-3. Fork variants leaked in. curl publishes `tiny-curl-*`, a cut-down embedded
-   build; `ossl_connect_common` survives in `tiny-curl-8_4_0`. Counting that
-   as a release makes the downgrade fire for a symbol that mainline deleted
-   years ago — the right answer for entirely the wrong reason.
-
-Fixed by dropping pre-releases, grouping tags by prefix, keeping only the
-dominant (mainline) prefix, and walking back 14 distinct versions.
-`ossl_connect_common` in report 3969255 is now downgraded because it is
-genuinely present at `curl-8_12_1`, `curl-8_12_0` and `curl-8_11_1`, verified
-directly against the tree rather than taken from the note.
-
-**This widening costs recall, deliberately.** Report 3400831 falls from two
-contradictions to one: `CURLX_SET_BINMODE` really did exist at `curl-8_16_0`,
-so contradicting it was wrong. The surviving finding is the honest one — the
-report cites `include/tool_binmode.h`, and that header lived at
-`src/tool_binmode.h` before moving to `lib/curlx/binmode.h`. Never
-`include/`. For a tool whose only asset is a maintainer trusting its
-CONTRADICTED lines, trading recall for precision is the right direction.
-
-The same downgrade now covers the path axis, but it is deliberately *not* a
-copy of the symbol logic, because two questions hide inside "this file is
-missing" and they need opposite answers:
-
-| question | verdict |
-|---|---|
-| did this **exact path** exist at an older release? | **downgrade** — stale ref, not fabrication |
-| did a file with this **basename** exist elsewhere? | **context only, no downgrade** |
-
-Conflating them would suppress the single most useful thing this tool
-produces. Report 3400831 cites `include/tool_binmode.h`; that header lived at
-`src/tool_binmode.h` and later `lib/curlx/binmode.h`, never under `include/`.
-It stays CONTRADICTED, and now says why: *"the name is real but the location
-in the report is not"*. Meanwhile `packages/OS400/os400sys.c` in report
-3418528 is downgraded, because that exact path genuinely existed at
-`curl-8_18_0`.
-
-Cost, after caching: one `ls-tree` per release tag for an entire run, rather
-than one per tag per claim. Counted as git subprocesses, which is
-deterministic where wall-clock is not:
-
-| report | tree probes | total git calls |
+| | n | got ≥1 contradiction |
 |---|---|---|
-| 3418528 | 73 → 15 | 93 → 35 |
-| 3400831 | 103 → 15 | 116 → 28 |
-| 3125832 | 169 → 15 | 271 → 117 |
+| **confirmed vulnerabilities** | 126 | **73.0%** |
+| archived slop | 49 | 83.7% |
+| unlabelled | 382 | 77.2% |
 
-Verdicts are byte-identical before and after.
+**92 of 126 genuine, curl-confirmed vulnerability reports are contradicted.**
+The separation between real and fake is about ten points. As a gate — "any
+contradiction means look here" — that is useless, and worse than useless if a
+maintainer trusts it.
 
-Remaining rough edge: a bare filename that matches elsewhere hits the
-relocation branch before the bare-filename branch, so it reads "the location
-in the report is not" when the report gave no location. The observed text is
-still accurate; the phrasing is not.
+### It is not the stale-ref problem
 
-The *ratio* carries more signal than the count: genuine reports produce many
-consistent claims because they cite real code precisely. n=6 remains an
-anecdote, not an evaluation — see below.
+That was the obvious hypothesis and it is wrong. Split by year filed, recent
+reports contradict *more*, not less:
 
-### The failure mode that matters, found the hard way
+```
+2019  60.0%     2022  73.9%     2025  81.8%
+2020  66.7%     2023  72.2%     2026  79.5%
+2021  46.2%     2024  81.8%
+```
 
-Nine defects were fixed in this tool's first week. Three of them silently
-disabled the stale-`--ref` downgrade, and the pattern in the other two is
-worth stating outright, because it is the thing a maintainer should know
-before trusting any output here:
+### What is actually broken
 
-**Both times this tool wrongly contradicted an honest claim, the cause was
-checking HEAD when the report described an older release.** First
-`ossl_connect_common`, called fabricated when it lived in curl through
-8.12.1. Then `packages/OS400/os400sys.c`, called fabricated when it lived in
-curl through 8.18.0 and simply moved directory. Both were written up as
-confirmed findings before anyone checked a second ref.
+Share of false contradictions on confirmed vulnerabilities, by check:
 
-That is not a benchmark result, it is the central failure mode reproducing
-itself during the tool's own development, on the people building it. It is
-also why `--ref` is the flag that matters more than any other, why a missing
-symbol is downgraded rather than contradicted when it exists at a recent
-release, and why every `CONTRADICTED` line names what was observed: so a
-maintainer can check the tool instead of trusting it.
+```
+snippet_present   35.5%      file_exists     18.6%
+symbol_exists     21.5%      commit_exists    3.8%
+line_in_range     20.5%
+```
 
-The honest pitch is not "this catches slop". It is: the most common way to
-wrongly contradict a report is to check the wrong version, and this tool now
-knows to say so instead of guessing.
+`snippet_present` is unsound by construction. It demands that quoted code
+appear verbatim in the tree, but reporters quote their own proof-of-concept
+code, build steps, illustrations and patches. Three it rejected on *confirmed*
+vulnerabilities:
+
+- `mkdir c:\usr\local\ssl` — a build instruction
+- `void *ptr2 = realloc(ptr, len);` — the reporter's own illustration
+- `static CURLUcode seturl(const char *url, CURLU *u, unsigned int flags)` — a
+  real signature that has since changed
+
+The check was written on the theory that fabricated reports quote invented
+code. They do. So does everyone else, for different reasons.
+
+### No ablation rescues it
+
+| disabled | genuine wrongly flagged | slop caught |
+|---|---|---|
+| nothing (as shipped) | 73.0% | 83.7% |
+| snippet | 57.9% | 73.5% |
+| snippet + line + commit | **54.8%** | 73.5% |
+| snippet + line + file | 43.7% | 46.9% |
+
+The best configuration still contradicts more than half of genuine reports.
+Disable enough to fix precision and slop detection collapses with it.
+
+### What this means
+
+The binary gate is the wrong product, and the exit code should not be read as
+a verdict. What survives is what the design notes said before the
+implementation drifted: **an annotator, not a gate.** Individual findings are
+frequently correct and useful — *this symbol is absent at HEAD but present at
+8.12.1; this file moved here; this line is past end-of-file* — even where the
+aggregate carries no signal. A maintainer skims the transcript in ten seconds
+and decides.
+
+Caveats that limit every number above: all reports were scored against one ref
+(HEAD), so this is a lower bound on precision; the slop label is membership in
+a small, non-random published archive; and `unlabelled` is mostly
+not-applicable and informative reports, many of them honest and out of scope —
+it is not a negative class. `evaluate.py` prints these with its output.
+
+### Reproducing
+
+```bash
+python3 fetch_curl_corpus.py --out data/curl        # ~10 min, rate limited, resumable
+python3 evaluate.py --corpus data/curl --repo curl-repo --ref HEAD
+```
+
+Scoring 557 reports takes about two minutes. A shared `RepoCache` derives
+repository facts (file lists, blobs, tags, grep hits) once rather than once per
+report, and greps are batched — `git grep -o` names the matched pattern, so one
+call with many `-e` patterns partitions exactly back to per-needle answers.
+Together that cut git subprocesses from 20,295 to 4,160 with all 9,590
+findings byte-identical.
 
 ## Roadmap
 
