@@ -38,8 +38,8 @@ directory into `projects`"). Checking against HEAD alone called a truthful
 line fabricated. A tool that does that to a reporter deserves to be ignored.
 
 **Before reading further: measured across all 557 publicly disclosed curl
-reports, this tool contradicts 73% of confirmed vulnerabilities.** It does not
-work as a gate. See [Measured behaviour](#measured-behaviour) — that section is
+reports, this tool contradicts 57.9% of confirmed vulnerabilities.** It does
+not work as a gate. See [Measured behaviour](#measured-behaviour) — that section is
 the honest summary of what this does and does not do, and the example above is
 an illustration of the mechanism, not a result.
 
@@ -150,14 +150,18 @@ disclosures: **557 curl reports — 126 confirmed vulnerabilities (`resolved`),
 
 | | n | got ≥1 contradiction |
 |---|---|---|
-| **confirmed vulnerabilities** | 126 | **73.0%** |
-| archived slop | 49 | 83.7% |
-| unlabelled | 382 | 77.2% |
+| **confirmed vulnerabilities** | 126 | **57.9%** |
+| archived slop | 49 | 73.5% |
+| unlabelled | 382 | 61.0% |
 
-**92 of 126 genuine, curl-confirmed vulnerability reports are contradicted.**
-The separation between real and fake is about ten points. As a gate — "any
+**73 of 126 genuine, curl-confirmed vulnerability reports are contradicted.**
+The separation between real and fake is about fifteen points. As a gate — "any
 contradiction means look here" — that is useless, and worse than useless if a
 maintainer trusts it.
+
+Those figures are after demoting `snippet_present` (below). As originally
+shipped the tool contradicted **73.0%** of confirmed vulnerabilities against
+83.7% of slop: a ten-point gap.
 
 ### It is not the stale-ref problem
 
@@ -170,9 +174,10 @@ reports contradict *more*, not less:
 2021  46.2%     2024  81.8%
 ```
 
-### What is actually broken
+### What was actually broken
 
-Share of false contradictions on confirmed vulnerabilities, by check:
+Share of false contradictions on confirmed vulnerabilities, as originally
+shipped:
 
 ```
 snippet_present   35.5%      file_exists     18.6%
@@ -180,10 +185,10 @@ symbol_exists     21.5%      commit_exists    3.8%
 line_in_range     20.5%
 ```
 
-`snippet_present` is unsound by construction. It demands that quoted code
+`snippet_present` was unsound by construction. It demanded that quoted code
 appear verbatim in the tree, but reporters quote their own proof-of-concept
-code, build steps, illustrations and patches. Three it rejected on *confirmed*
-vulnerabilities:
+code, build steps, illustrations and patches. Three lines it rejected on
+*confirmed* vulnerabilities:
 
 - `mkdir c:\usr\local\ssl` — a build instruction
 - `void *ptr2 = realloc(ptr, len);` — the reporter's own illustration
@@ -193,22 +198,41 @@ vulnerabilities:
 The check was written on the theory that fabricated reports quote invented
 code. They do. So does everyone else, for different reasons.
 
-### No ablation rescues it
+**It no longer produces CONTRADICTED.** That is a semantics fix, not a tuning
+choice: `CONTRADICTED` asserts the tree positively disagrees, and an absent
+quoted line asserts nothing of the kind — the tree simply has nothing to say.
+It now returns UNCHECKABLE.
+
+The decisive measurement was not "how much slop detection does it cost" but
+"what does it uniquely catch" — reports where `snippet_present` was the *only*
+contradiction:
+
+| | sole contradiction |
+|---|---|
+| confirmed vulnerabilities | **19 / 126** — pure false alarms |
+| archived slop | **5 / 49** — real detections lost |
+
+Close to 4:1 against. Demoting it improves discrimination rather than trading
+it away: the gap to slop *widens* from +10.7 to +15.6 points while false
+contradictions on genuine reports fall from 73.0% to 57.9%. Absolute catch
+rate was never the goal; separation is.
+
+### Ablations on the original checks
 
 | disabled | genuine wrongly flagged | slop caught |
 |---|---|---|
-| nothing (as shipped) | 73.0% | 83.7% |
-| snippet | 57.9% | 73.5% |
-| snippet + line + commit | **54.8%** | 73.5% |
+| nothing (as originally shipped) | 73.0% | 83.7% |
+| snippet *(now the default)* | **57.9%** | 73.5% |
+| snippet + line + commit | 54.8% | 73.5% |
 | snippet + line + file | 43.7% | 46.9% |
 
-The best configuration still contradicts more than half of genuine reports.
-Disable enough to fix precision and slop detection collapses with it.
+Nothing beyond the snippet fix pays for itself: the remaining options buy a
+few points of precision by destroying slop detection.
 
 ### What this means
 
-The binary gate is the wrong product, and the exit code should not be read as
-a verdict. What survives is what the design notes said before the
+The binary gate is still the wrong product, and the exit code should not be
+read as a verdict. 57.9% is a narrower hole than 73.0%, not a closed one. What survives is what the design notes said before the
 implementation drifted: **an annotator, not a gate.** Individual findings are
 frequently correct and useful — *this symbol is absent at HEAD but present at
 8.12.1; this file moved here; this line is past end-of-file* — even where the
