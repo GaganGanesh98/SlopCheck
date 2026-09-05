@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, asdict
 
 from .claims import Claim
@@ -39,30 +40,72 @@ class Finding:
         return asdict(self)
 
 
+class RepoCache:
+    """Git facts that depend only on (repo, ref), safe to share across Trees.
+
+    A Tree's caches answer questions about the repository -- which files exist
+    at a ref, what a blob contains, which tags there are, where a word occurs.
+    None of that varies by report, so scoring a corpus with one Tree per report
+    re-derives all of it once per report. On 557 curl reports that was ~10,000
+    git subprocesses, dominated by re-listing the same trees.
+
+    What must NOT be shared is `_history_budget`: that is per-report rate
+    limiting, not data, and it stays on the Tree.
+
+    Values are deterministic, so the compute runs outside the lock. A race
+    duplicates work but cannot produce a wrong answer, and holding a lock
+    across a git subprocess would serialise every worker.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._d: dict = {}
+
+    def get(self, key, compute):
+        try:
+            return self._d[key]
+        except KeyError:
+            pass
+        value = compute()
+        with self._lock:
+            return self._d.setdefault(key, value)
+
+    def has(self, key) -> bool:
+        return key in self._d
+
+    def put(self, key, value) -> None:
+        with self._lock:
+            self._d.setdefault(key, value)
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+
 class Tree:
     """Read-only view of a git repository at one ref."""
 
-    def __init__(self, repo: str, ref: str = "HEAD"):
+    def __init__(self, repo: str, ref: str = "HEAD", cache: "RepoCache | None" = None):
         self.repo = repo
         self.ref = ref
-        self._files: set[str] | None = None
-        self._lines: dict[str, int] = {}
-        self._blob: dict[str, str] = {}
-        self._recent_tags: list[str] | None = None
-        self._ref_idx: dict[str, tuple[set[str], dict[str, list[str]]]] = {}
+        # Default is a private cache, so a lone Tree behaves exactly as before.
+        # Pass a shared RepoCache to score many reports against one repository.
+        self.cache = cache if cache is not None else RepoCache()
         self.has_rg = shutil.which("rg") is not None
         # A partial (blobless/treeless) clone makes cross-ref grep pathological:
         # every probe lazily refetches blobs over the network. Detect it once
         # and disable history probing rather than appearing to hang.
         self.partial = self._is_partial()
+        # Per-report, never shared: this is rate limiting, not data.
         self._history_budget = 0 if self.partial else 12
 
     def _is_partial(self) -> bool:
-        p = self._git("config", "--get", "remote.origin.promisor")
-        if p.stdout.strip() == "true":
-            return True
-        p = self._git("config", "--get", "remote.origin.partialclonefilter")
-        return bool(p.stdout.strip())
+        def probe() -> bool:
+            p = self._git("config", "--get", "remote.origin.promisor")
+            if p.stdout.strip() == "true":
+                return True
+            p = self._git("config", "--get", "remote.origin.partialclonefilter")
+            return bool(p.stdout.strip())
+        return self.cache.get(("partial", self.repo), probe)
 
     def _git(self, *args: str, check: bool = False) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -76,59 +119,127 @@ class Tree:
 
     @property
     def files(self) -> set[str]:
-        if self._files is None:
-            p = self._git("ls-tree", "-r", "--name-only", self.ref)
-            self._files = set(p.stdout.splitlines()) if p.returncode == 0 else set()
-        return self._files
+        return self._ref_index(self.ref)[0]
 
     def find_paths_ending(self, path: str) -> list[str]:
         """Paths in the tree whose tail matches, e.g. 'os400sys.c'."""
-        tail = path.split("/")[-1]
-        return sorted(f for f in self.files if f.split("/")[-1] == tail)
+        return sorted(self._ref_index(self.ref)[1].get(path.split("/")[-1], []))
 
     def blob(self, path: str) -> str | None:
-        if path not in self._blob:
+        def read():
             p = self._git("show", f"{self.ref}:{path}")
-            self._blob[path] = p.stdout if p.returncode == 0 else None
-        return self._blob[path]
+            return p.stdout if p.returncode == 0 else None
+        return self.cache.get(("blob", self.repo, self.ref, path), read)
 
     def line_count(self, path: str) -> int | None:
-        if path not in self._lines:
-            b = self.blob(path)
-            self._lines[path] = None if b is None else b.count("\n") + 1
-        return self._lines[path]
+        b = self.blob(path)
+        return None if b is None else b.count("\n") + 1
 
     def grep_word(self, word: str) -> list[str]:
         """Whole-word search across the tree. Returns 'path:line' hits."""
-        p = self._git("grep", "-n", "-w", "-F", "--", word, self.ref)
-        if p.returncode not in (0, 1):
-            return []
-        hits = []
-        for ln in p.stdout.splitlines()[:200]:
-            # format: <ref>:<path>:<lineno>:<text>
-            parts = ln.split(":", 3)
-            if len(parts) >= 3:
-                hits.append(f"{parts[1]}:{parts[2]}")
-        return hits
+        def search():
+            p = self._git("grep", "-n", "-w", "-F", "--", word, self.ref)
+            if p.returncode not in (0, 1):
+                return []
+            hits = []
+            for ln in p.stdout.splitlines()[:200]:
+                # format: <ref>:<path>:<lineno>:<text>
+                parts = ln.split(":", 3)
+                if len(parts) >= 3:
+                    hits.append(f"{parts[1]}:{parts[2]}")
+            return hits
+        return self.cache.get(("grepw", self.repo, self.ref, word), search)
 
     def grep_fixed(self, needle: str) -> list[str]:
-        p = self._git("grep", "-n", "-F", "--", needle, self.ref)
-        if p.returncode not in (0, 1):
-            return []
-        out = []
-        for ln in p.stdout.splitlines()[:50]:
-            parts = ln.split(":", 3)
-            if len(parts) >= 3:
-                out.append(f"{parts[1]}:{parts[2]}")
-        return out
+        def search():
+            p = self._git("grep", "-n", "-F", "--", needle, self.ref)
+            if p.returncode not in (0, 1):
+                return []
+            out = []
+            for ln in p.stdout.splitlines()[:50]:
+                parts = ln.split(":", 3)
+                if len(parts) >= 3:
+                    out.append(f"{parts[1]}:{parts[2]}")
+            return out
+        return self.cache.get(("grepf", self.repo, self.ref, needle), search)
+
+    # One `git grep` costs ~60ms on a tree the size of curl's, and a corpus run
+    # spent 93% of its wall time in them. `git grep -o` prints the matched text
+    # itself, so a single call carrying many -e patterns can be partitioned back
+    # into exact per-needle answers -- no heuristic attribution, same results.
+    _BATCH_MAX = 200        # patterns per call
+    _BATCH_BYTES = 60000    # keep well under ARG_MAX
+
+    def _batches(self, needles: list[str]):
+        cur: list[str] = []
+        size = 0
+        for w in needles:
+            if cur and (len(cur) >= self._BATCH_MAX
+                        or size + len(w) > self._BATCH_BYTES):
+                yield cur
+                cur, size = [], 0
+            cur.append(w)
+            size += len(w) + 4
+        if cur:
+            yield cur
+
+    def _grep_located(self, needles: list[str], word: bool, cap: int,
+                      kind: str) -> None:
+        """Fill the cache with path:line hits for each needle, in few calls."""
+        key = lambda w: (kind, self.repo, self.ref, w)
+        todo = [w for w in dict.fromkeys(needles) if not self.cache.has(key(w))]
+        for group in self._batches(todo):
+            hits: dict[str, list[str]] = {w: [] for w in group}
+            args = ["grep", "-n", "-o", "-F"] + (["-w"] if word else [])
+            for w in group:
+                args += ["-e", w]
+            p = self._git(*args, self.ref)
+            if p.returncode in (0, 1):
+                for ln in p.stdout.splitlines():
+                    # <ref>:<path>:<lineno>:<matched text>
+                    parts = ln.split(":", 3)
+                    if len(parts) < 4:
+                        continue
+                    bucket = hits.get(parts[3])
+                    if bucket is None:
+                        continue
+                    loc = f"{parts[1]}:{parts[2]}"
+                    # -o emits one line per occurrence; the un-batched code saw
+                    # one line per matching LINE, so collapse repeats.
+                    if not bucket or bucket[-1] != loc:
+                        bucket.append(loc)
+            for w in group:
+                self.cache.put(key(w), hits[w][:cap])
+
+    def prefetch_words(self, words: list[str]) -> None:
+        self._grep_located(words, word=True, cap=200, kind="grepw")
+
+    def prefetch_fixed(self, needles: list[str]) -> None:
+        self._grep_located(needles, word=False, cap=50, kind="grepf")
+
+    def prefetch_words_in_ref(self, words: list[str], ref: str) -> None:
+        """Presence-only probe across one tag, batched. -h drops the filename,
+        leaving just the matched identifiers."""
+        key = lambda w: ("wordref", self.repo, ref, w)
+        todo = [w for w in dict.fromkeys(words) if not self.cache.has(key(w))]
+        for group in self._batches(todo):
+            args = ["grep", "-h", "-o", "-w", "-F"]
+            for w in group:
+                args += ["-e", w]
+            p = self._git(*args, ref)
+            found = set(p.stdout.split()) if p.returncode in (0, 1) else set()
+            for w in group:
+                self.cache.put(key(w), w in found)
 
     def commit_exists(self, sha: str) -> bool:
-        p = self._git("cat-file", "-e", f"{sha}^{{commit}}")
-        return p.returncode == 0
+        return self.cache.get(
+            ("commit", self.repo, sha),
+            lambda: self._git("cat-file", "-e", f"{sha}^{{commit}}").returncode == 0)
 
     def tags(self) -> list[str]:
-        p = self._git("tag")
-        return p.stdout.split() if p.returncode == 0 else []
+        return self.cache.get(
+            ("tags", self.repo),
+            lambda: (lambda p: p.stdout.split() if p.returncode == 0 else [])(self._git("tag")))
 
     def recent_tags(self, n: int = 14) -> list[str]:
         """The project's N most recent RELEASE tags, newest first.
@@ -149,11 +260,12 @@ class Tree:
         So: drop pre-release tags, group by prefix, keep only the dominant
         prefix (the mainline series), and walk back N distinct versions.
         """
-        if self._recent_tags is not None:
-            return self._recent_tags
+        return self.cache.get(("recent_tags", self.repo, n),
+                              lambda: self._compute_recent_tags(n))
+
+    def _compute_recent_tags(self, n: int) -> list[str]:
         p = self._git("tag", "--sort=-creatordate")
         if p.returncode != 0:
-            self._recent_tags = []
             return []
 
         prerelease = re.compile(r"(?i)(?:^|[-_.])(rc|alpha|beta|pre|dev|snapshot|test)")
@@ -170,7 +282,6 @@ class Tree:
             ver = tuple(int(g) for g in m.groups() if g is not None)
             parsed.append((prefix, ver, t))
         if not parsed:
-            self._recent_tags = []
             return []
 
         counts: dict[str, int] = {}
@@ -188,12 +299,12 @@ class Tree:
             out.append(tag)
             if len(out) >= n:
                 break
-        self._recent_tags = out
         return out
 
     def word_in_ref(self, word: str, ref: str) -> bool:
-        p = self._git("grep", "-q", "-w", "-F", "--", word, ref)
-        return p.returncode == 0
+        return self.cache.get(
+            ("wordref", self.repo, ref, word),
+            lambda: self._git("grep", "-q", "-w", "-F", "--", word, ref).returncode == 0)
 
     def path_in_ref(self, path: str, ref: str) -> bool:
         return path in self._ref_index(ref)[0]
@@ -206,14 +317,18 @@ class Tree:
         ~0.5s each time. Now it is at most 14 for the entire run, and both the
         exact-path and basename questions are answered from memory.
         """
-        if ref not in self._ref_idx:
+        def build():
             p = self._git("ls-tree", "-r", "--name-only", ref)
-            paths = set(p.stdout.splitlines()) if p.returncode == 0 else set()
+            listed = p.stdout.splitlines() if p.returncode == 0 else []
             by_tail: dict[str, list[str]] = {}
-            for f in paths:
+            # Build from git's own ordering, NOT from the set: iterating a set
+            # of strings varies between processes under hash randomisation, and
+            # path_history_note reports elsewhere[0], so that made the observed
+            # text non-reproducible run to run.
+            for f in listed:
                 by_tail.setdefault(f.rsplit("/", 1)[-1], []).append(f)
-            self._ref_idx[ref] = (paths, by_tail)
-        return self._ref_idx[ref]
+            return (set(listed), by_tail)
+        return self.cache.get(("tree", self.repo, ref), build)
 
     def files_ending_in_ref(self, tail: str, ref: str) -> list[str]:
         return self._ref_index(ref)[1].get(tail, [])
@@ -352,19 +467,24 @@ def check_commit(t: Tree, c: Claim) -> Finding:
                    "no such commit in this repository", c.context)
 
 
+def _snippet_needle(body: str) -> str | None:
+    """The line a snippet is judged by. Shared with the prefetch pass so the
+    batched lookup and the check can never disagree about what was searched."""
+    cands = [l for l in (x.strip() for x in body.splitlines())
+             if len(l) > 25 and not l.startswith(("#", "//", "*", "$", ">"))]
+    return max(cands, key=len) if cands else None
+
+
 def check_snippet(t: Tree, c: Claim) -> Finding:
     """Does a distinctive line of the quoted code appear in the tree?
 
     Reports frequently quote a 'snippet from the source' that was actually
     written by the reporter. We test the longest non-trivial line.
     """
-    lines = [l.strip() for l in c.value.splitlines()]
-    cands = [l for l in lines
-             if len(l) > 25 and not l.startswith(("#", "//", "*", "$", ">"))]
-    if not cands:
+    needle = _snippet_needle(c.value)
+    if needle is None:
         return Finding(c.kind, c.value[:60], "snippet_present", UNCHECKABLE,
                        "no distinctive line to search for", c.context)
-    needle = max(cands, key=len)
     hits = t.grep_fixed(needle)
     short = (needle[:70] + "...") if len(needle) > 70 else needle
     if hits:
@@ -397,7 +517,38 @@ CHECKS = {
 }
 
 
+def _prefetch(tree: Tree, claims: list[Claim], max_symbols: int) -> None:
+    """Resolve every grep this report needs in a handful of batched calls.
+
+    Purely a cache warm-up: each check still asks the same question and gets
+    the same answer, it just finds it already computed. Verdicts are unchanged
+    by construction, and that is verified against the full 557-report corpus.
+    """
+    symbols, snippets, seen = [], [], 0
+    for c in claims:
+        if c.kind == "symbol":
+            seen += 1
+            if seen <= max_symbols:
+                symbols.append(c.value)
+        elif c.kind == "snippet":
+            n = _snippet_needle(c.value)
+            if n:
+                snippets.append(n)
+    tree.prefetch_words(symbols)
+    tree.prefetch_fixed(snippets)
+
+    # Symbols absent at this ref trigger the history probe, which otherwise
+    # greps each release tag once PER SYMBOL. Batched it is one call per tag
+    # for the whole report, regardless of how many symbols are missing.
+    if tree._history_budget > 0:
+        missing = [w for w in dict.fromkeys(symbols) if not tree.grep_word(w)]
+        if missing:
+            for tag in tree.recent_tags():
+                tree.prefetch_words_in_ref(missing, tag)
+
+
 def run(tree: Tree, claims: list[Claim], max_symbols: int = 40) -> list[Finding]:
+    _prefetch(tree, claims, max_symbols)
     findings: list[Finding] = []
     sym_seen = 0
     for c in claims:

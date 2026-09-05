@@ -1,0 +1,8 @@
+access notes without permission
+
+https://web.archive.org/web/*/https://github.com/curl/curl
+
+## Impact
+
+## Summary:
+access notes without permission

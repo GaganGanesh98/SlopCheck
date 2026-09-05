@@ -1,0 +1,8 @@
+Disclosure of email addresses
+
+https://github.com/curl/curl/blob/master/.mailmap
+
+## Impact
+
+## Summary:
+Disclosure of email addresses
