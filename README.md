@@ -191,10 +191,17 @@ in the report is not"*. Meanwhile `packages/OS400/os400sys.c` in report
 3418528 is downgraded, because that exact path genuinely existed at
 `curl-8_18_0`.
 
-Cost: a path claim that misses the exact-path check walks the full 14-release
-window, ~0.5s per claim on curl, and `files_ending_in_ref` re-lists each tree
-without caching across claims. Report 3400831 went from 0.7s to 2.0s. Worth
-it, but the cache is the obvious next optimisation.
+Cost, after caching: one `ls-tree` per release tag for an entire run, rather
+than one per tag per claim. Counted as git subprocesses, which is
+deterministic where wall-clock is not:
+
+| report | tree probes | total git calls |
+|---|---|---|
+| 3418528 | 73 → 15 | 93 → 35 |
+| 3400831 | 103 → 15 | 116 → 28 |
+| 3125832 | 169 → 15 | 271 → 117 |
+
+Verdicts are byte-identical before and after.
 
 Remaining rough edge: a bare filename that matches elsewhere hits the
 relocation branch before the bare-filename branch, so it reads "the location
@@ -204,6 +211,31 @@ still accurate; the phrasing is not.
 The *ratio* carries more signal than the count: genuine reports produce many
 consistent claims because they cite real code precisely. n=6 remains an
 anecdote, not an evaluation — see below.
+
+### The failure mode that matters, found the hard way
+
+Nine defects were fixed in this tool's first week. Three of them silently
+disabled the stale-`--ref` downgrade, and the pattern in the other two is
+worth stating outright, because it is the thing a maintainer should know
+before trusting any output here:
+
+**Both times this tool wrongly contradicted an honest claim, the cause was
+checking HEAD when the report described an older release.** First
+`ossl_connect_common`, called fabricated when it lived in curl through
+8.12.1. Then `packages/OS400/os400sys.c`, called fabricated when it lived in
+curl through 8.18.0 and simply moved directory. Both were written up as
+confirmed findings before anyone checked a second ref.
+
+That is not a benchmark result, it is the central failure mode reproducing
+itself during the tool's own development, on the people building it. It is
+also why `--ref` is the flag that matters more than any other, why a missing
+symbol is downgraded rather than contradicted when it exists at a recent
+release, and why every `CONTRADICTED` line names what was observed: so a
+maintainer can check the tool instead of trusting it.
+
+The honest pitch is not "this catches slop". It is: the most common way to
+wrongly contradict a report is to check the wrong version, and this tool now
+knows to say so instead of guessing.
 
 ## Roadmap
 
