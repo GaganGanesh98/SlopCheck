@@ -1,0 +1,20 @@
+[project]
+name = "slopcheck"
+version = "0.1.0"
+description = "Check a vulnerability report's stated facts against a source tree. Read-only, executes nothing, produces evidence not a verdict."
+requires-python = ">=3.10"
+dependencies = []
+license = {text = "MIT"}
+
+[project.scripts]
+slopcheck = "slopcheck.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# The README tells users to clone the target repo into ./curl-repo, and pytest
+# would otherwise try to collect that project's own test suite.
+testpaths = ["tests"]
+norecursedirs = ["*-repo", ".git", "build", "dist", "*.egg-info"]
