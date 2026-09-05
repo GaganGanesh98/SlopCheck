@@ -8,22 +8,34 @@ Read-only. Executes nothing. Downloads nothing. Produces evidence, not a verdict
 ```
 $ slopcheck report.txt --repo ./curl --ref HEAD
 
-  8 contradicted   0 consistent   1 uncheckable
+  7 contradicted   0 consistent   2 uncheckable
 
 --- CONTRADICTED ---------------------------------------------
-[X] path: packages/OS400/os400sys.c
-     check    : file_exists
-     observed : no such path at HEAD; a file with that name exists
-                elsewhere: projects/OS400/os400sys.c
-
 [X] symbol: Curl_ldap_err2string
      check    : symbol_exists
      observed : identifier appears nowhere in the tree at HEAD
+
+--- UNCHECKABLE ----------------------------------------------
+[?] path: packages/OS400/os400sys.c
+     check    : file_exists
+     observed : no such path at HEAD; a file with that name exists
+                elsewhere: projects/OS400/os400sys.c — but it IS
+                present at curl-8_18_0, curl-8_17_0, curl-8_16_0;
+                the report may describe an older release, so re-run
+                with --ref set to the version the reporter named
 ```
 
 That is a real report ([curl #3418528](https://hackerone.com/reports/3418528),
-closed as spam). A maintainer reached the same two conclusions by hand. This
-took 0.4 seconds.
+closed as spam). This took 1.9 seconds.
+
+Note which claim survives as CONTRADICTED and which does not, because an
+earlier version of this README got it wrong. `Curl_ldap_err2string` is
+invented, and that is exactly the finding curl's maintainer made by hand:
+*"This function does not exist... It is made up."* But the **path claim was
+honest**. `packages/OS400/os400sys.c` really did exist in curl through 8.18.0
+and moved to `projects/` in `3ee1d3b573` ("tidy-up: merge root `packages`
+directory into `projects`"). Checking against HEAD alone called a truthful
+line fabricated. A tool that does that to a reporter deserves to be ignored.
 
 ---
 
@@ -126,10 +138,10 @@ clone of curl at `8071d7adc2` (HEAD, 2026-09-05), no `--ref` given.
 
 | report | label | contradicted | consistent | uncheckable | time |
 |---|---|---|---|---|---|
-| [2871792](https://hackerone.com/reports/2871792) | slop | 1 | 0 | 0 | 1.1s |
-| [3125832](https://hackerone.com/reports/3125832) | slop | 16 | 2 | 5 | 6.4s |
-| [3400831](https://hackerone.com/reports/3400831) | slop | 1 | 2 | 4 | 0.7s |
-| [3418528](https://hackerone.com/reports/3418528) | slop | 8 | 0 | 1 | 1.1s |
+| [2871792](https://hackerone.com/reports/2871792) | slop | 1 | 0 | 0 | 1.0s |
+| [3125832](https://hackerone.com/reports/3125832) | slop | 16 | 2 | 5 | 8.2s |
+| [3400831](https://hackerone.com/reports/3400831) | slop | 1 | 2 | 4 | 2.0s |
+| [3418528](https://hackerone.com/reports/3418528) | slop | 7 | 0 | 2 | 1.9s |
 | [3969255](https://hackerone.com/reports/3969255) | **genuine (CVE)** | **0** | 19 | 7 | 2.2s |
 | [3973228](https://hackerone.com/reports/3973228) | **genuine** | **0** | 14 | 1 | 0.8s |
 
@@ -162,10 +174,32 @@ report cites `include/tool_binmode.h`, and that header lived at
 `include/`. For a tool whose only asset is a maintainer trusting its
 CONTRADICTED lines, trading recall for precision is the right direction.
 
-Known gap: `check_path` does not consult the history probe at all, so a path
-claim about an older release still comes back CONTRADICTED where a symbol
-claim would be downgraded. `history_note(is_path=True)` exists and is
-unused. That is the same defect class as the three above, on the other axis.
+The same downgrade now covers the path axis, but it is deliberately *not* a
+copy of the symbol logic, because two questions hide inside "this file is
+missing" and they need opposite answers:
+
+| question | verdict |
+|---|---|
+| did this **exact path** exist at an older release? | **downgrade** — stale ref, not fabrication |
+| did a file with this **basename** exist elsewhere? | **context only, no downgrade** |
+
+Conflating them would suppress the single most useful thing this tool
+produces. Report 3400831 cites `include/tool_binmode.h`; that header lived at
+`src/tool_binmode.h` and later `lib/curlx/binmode.h`, never under `include/`.
+It stays CONTRADICTED, and now says why: *"the name is real but the location
+in the report is not"*. Meanwhile `packages/OS400/os400sys.c` in report
+3418528 is downgraded, because that exact path genuinely existed at
+`curl-8_18_0`.
+
+Cost: a path claim that misses the exact-path check walks the full 14-release
+window, ~0.5s per claim on curl, and `files_ending_in_ref` re-lists each tree
+without caching across claims. Report 3400831 went from 0.7s to 2.0s. Worth
+it, but the cache is the obvious next optimisation.
+
+Remaining rough edge: a bare filename that matches elsewhere hits the
+relocation branch before the bare-filename branch, so it reads "the location
+in the report is not" when the report gave no location. The observed text is
+still accurate; the phrasing is not.
 
 The *ratio* carries more signal than the count: genuine reports produce many
 consistent claims because they cite real code precisely. n=6 remains an
