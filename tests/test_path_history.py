@@ -33,7 +33,12 @@ def repo(tmp_path):
     git(r, "config", "user.email", "t@example.invalid")
     git(r, "config", "user.name", "t")
 
-    (r / "old" / "sys.c").write_text("int f(void){return 1;}\n")
+    # Long enough to clear check_snippet's 25-char distinctiveness floor: the
+    # obvious one-liner (`int f(void){return 1;}`) is 22 chars, so a snippet
+    # test against it would return UNCHECKABLE for a reason unrelated to what
+    # it is meant to be checking.
+    (r / "old" / "sys.c").write_text(
+        "int parse_header_field(const char *buf, size_t len){return 1;}\n")
     (r / "old" / "only_here.h").write_text("#define X 1\n")
     git(r, "add", "-A"); git(r, "commit", "-q", "-m", "v1")
     for t in ("proj-1_0_0", "proj-1_1_0", "proj-1_2_0"):
@@ -98,3 +103,29 @@ def test_probe_respects_the_history_budget(repo):
     t._history_budget = 0
     note, downgrade = t.path_history_note("old/sys.c")
     assert note == "" and downgrade is False
+
+
+# --- snippet_present must never assert the tree disagrees ------------------
+
+def test_absent_snippet_is_uncheckable_not_contradicted(repo):
+    """A quoted line that is absent proves nothing: reporters paste their own
+    PoC code, build steps and output. Measured on 557 curl reports, this check
+    was the sole contradiction on 19/126 confirmed vulnerabilities against
+    5/49 archived slop -- far more false alarms than detections."""
+    from slopcheck.checks import check_snippet
+    from slopcheck.claims import Claim
+    f = check_snippet(Tree(str(repo)),
+                      Claim("snippet", "mkdir c:\\usr\\local\\ssl_and_more_padding\n", "ctx"))
+    assert f.verdict == UNCHECKABLE
+    assert "weak evidence" in f.observed
+
+
+def test_present_snippet_is_still_consistent(repo):
+    from slopcheck.checks import check_snippet, CONSISTENT
+    from slopcheck.claims import Claim
+    f = check_snippet(Tree(str(repo)),
+                      Claim("snippet",
+                            "int parse_header_field(const char *buf, size_t len){return 1;}\n",
+                            "ctx"))
+    assert f.verdict == CONSISTENT
+    assert "found at" in f.observed

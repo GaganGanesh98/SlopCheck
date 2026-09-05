@@ -117,8 +117,13 @@ def test_commit_checks(tree, repo):
 def test_snippet_checks(tree):
     real = "static char *Curl_ossl_strerror(int err)"
     assert checks.check_snippet(tree, Claim("snippet", real)).verdict == CONSISTENT
+    # An absent quoted line is UNCHECKABLE, never CONTRADICTED: the tree does
+    # not disagree with a reporter's own PoC code, build steps or output, it
+    # simply has nothing to say. This assertion previously expected
+    # CONTRADICTED, which was the tool's single largest source of false alarms
+    # on genuine reports.
     fake = "char *totally_invented_helper(int n) { return unchecked_alloc(n); }"
-    assert checks.check_snippet(tree, Claim("snippet", fake)).verdict == CONTRADICTED
+    assert checks.check_snippet(tree, Claim("snippet", fake)).verdict == UNCHECKABLE
 
 
 def test_version_tag_matching(tree):
