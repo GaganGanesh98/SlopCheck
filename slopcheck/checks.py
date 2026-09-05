@@ -198,6 +198,49 @@ class Tree:
         p = self._git("cat-file", "-e", f"{ref}:{path}")
         return p.returncode == 0
 
+    def files_ending_in_ref(self, tail: str, ref: str) -> list[str]:
+        p = self._git("ls-tree", "-r", "--name-only", ref)
+        if p.returncode != 0:
+            return []
+        return [f for f in p.stdout.splitlines() if f.split("/")[-1] == tail]
+
+    def path_history_note(self, path: str) -> tuple[str, bool]:
+        """History context for a path claim. Returns (note, should_downgrade).
+
+        Two different questions hide inside 'this file is missing', and they
+        deserve different answers:
+
+          (a) Did THIS EXACT path exist at an older release?  If so the
+              reporter is describing a real file that has since moved or gone,
+              which is a stale-ref problem, not a fabrication -> downgrade.
+
+          (b) Did a file with this BASENAME exist somewhere else?  That is
+              useful context, but it must NOT downgrade. A reporter who writes
+              `include/tool_binmode.h` when the file lived at
+              `src/tool_binmode.h` cited the wrong location, and saying so is
+              the single most useful thing this tool can tell a maintainer.
+              Suppressing it would throw away a correct finding.
+        """
+        if self._history_budget <= 0:
+            return "", False
+        self._history_budget -= 1
+        tags = self.recent_tags()
+
+        exact = [t for t in tags if self.path_in_ref(path, t)]
+        if exact:
+            return (" — but it IS present at " + ", ".join(exact[:3])
+                    + "; the report may describe an older release, so re-run "
+                      "with --ref set to the version the reporter named"), True
+
+        tail = path.split("/")[-1]
+        for t in tags:
+            elsewhere = self.files_ending_in_ref(tail, t)
+            if elsewhere:
+                return (f" — though a file of that name existed at "
+                        f"{elsewhere[0]} in {t}, so the name is real but the "
+                        f"location in the report is not"), False
+        return "", False
+
     def history_note(self, word: str, is_path: bool = False) -> str:
         """Cheap 'when did this exist' probe: grep a handful of release tags.
 
@@ -230,12 +273,13 @@ def check_path(t: Tree, c: Claim) -> Finding:
     if c.value in t.files:
         return Finding(c.kind, c.value, "file_exists", CONSISTENT,
                        f"present at {t.ref}", c.context)
+    note, downgrade = t.path_history_note(c.value)
     near = t.find_paths_ending(c.value)
     if near:
         return Finding(
-            c.kind, c.value, "file_exists", CONTRADICTED,
+            c.kind, c.value, "file_exists", UNCHECKABLE if downgrade else CONTRADICTED,
             f"no such path at {t.ref}; a file with that name exists elsewhere: "
-            + ", ".join(near[:4]),
+            + ", ".join(near[:4]) + note,
             c.context,
         )
     if "/" not in c.value:
@@ -245,9 +289,12 @@ def check_path(t: Tree, c: Claim) -> Finding:
         # ignore the tool.
         return Finding(c.kind, c.value, "file_exists", UNCHECKABLE,
                        "bare filename with no match in the tree; likely the reporter's "
-                       "own file rather than a claim about this project", c.context)
-    return Finding(c.kind, c.value, "file_exists", CONTRADICTED,
-                   f"no such path at {t.ref}, and no file of that name anywhere in the tree",
+                       "own file rather than a claim about this project" + note,
+                       c.context)
+    return Finding(c.kind, c.value, "file_exists",
+                   UNCHECKABLE if downgrade else CONTRADICTED,
+                   f"no such path at {t.ref}, and no file of that name anywhere "
+                   f"in the tree" + note,
                    c.context)
 
 
