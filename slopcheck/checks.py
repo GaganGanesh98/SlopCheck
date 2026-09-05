@@ -49,6 +49,7 @@ class Tree:
         self._lines: dict[str, int] = {}
         self._blob: dict[str, str] = {}
         self._recent_tags: list[str] | None = None
+        self._ref_idx: dict[str, tuple[set[str], dict[str, list[str]]]] = {}
         self.has_rg = shutil.which("rg") is not None
         # A partial (blobless/treeless) clone makes cross-ref grep pathological:
         # every probe lazily refetches blobs over the network. Detect it once
@@ -195,14 +196,27 @@ class Tree:
         return p.returncode == 0
 
     def path_in_ref(self, path: str, ref: str) -> bool:
-        p = self._git("cat-file", "-e", f"{ref}:{path}")
-        return p.returncode == 0
+        return path in self._ref_index(ref)[0]
+
+    def _ref_index(self, ref: str) -> tuple[set[str], dict[str, list[str]]]:
+        """One `ls-tree` per ref, cached: (all paths, basename -> paths).
+
+        Without this the path probe re-listed the whole tree once per tag per
+        claim -- 14 ls-tree calls for every path claim that missed, measured at
+        ~0.5s each time. Now it is at most 14 for the entire run, and both the
+        exact-path and basename questions are answered from memory.
+        """
+        if ref not in self._ref_idx:
+            p = self._git("ls-tree", "-r", "--name-only", ref)
+            paths = set(p.stdout.splitlines()) if p.returncode == 0 else set()
+            by_tail: dict[str, list[str]] = {}
+            for f in paths:
+                by_tail.setdefault(f.rsplit("/", 1)[-1], []).append(f)
+            self._ref_idx[ref] = (paths, by_tail)
+        return self._ref_idx[ref]
 
     def files_ending_in_ref(self, tail: str, ref: str) -> list[str]:
-        p = self._git("ls-tree", "-r", "--name-only", ref)
-        if p.returncode != 0:
-            return []
-        return [f for f in p.stdout.splitlines() if f.split("/")[-1] == tail]
+        return self._ref_index(ref)[1].get(tail, [])
 
     def path_history_note(self, path: str) -> tuple[str, bool]:
         """History context for a path claim. Returns (note, should_downgrade).
