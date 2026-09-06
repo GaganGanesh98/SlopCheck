@@ -6,3 +6,4 @@ curl-repo/
 *.egg-info/
 build/
 dist/
+data/curl/reports/

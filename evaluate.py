@@ -29,7 +29,8 @@ def score_one(args) -> dict:
     rec, corpus, repo, ref, cache = args
     text = (corpus / "reports" / f"{rec['id']}.txt").read_text(
         encoding="utf-8", errors="replace")
-    claims = extract(text)
+    tree_for_names = Tree(str(repo), ref, cache=cache)
+    claims = extract(text, tree_for_names.basenames())
     # Fresh Tree per report so the history budget is per-report, but sharing
     # the RepoCache: file lists, blobs, tags and grep hits are facts about the
     # repository, identical for every report. Re-deriving them per report cost
