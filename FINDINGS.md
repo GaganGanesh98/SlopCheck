@@ -38,16 +38,22 @@ unpaid volunteers.
 
 What happened in 2026:
 
-- **curl** shut down its bug bounty on 31 January after a flood of AI-generated
-  submissions. The share of reports that turned out to be real fell from about
-  15% to under 5%. It reopened on 25 February with no money attached.
+- **curl** shut down its bug bounty on 31 January 2026 after a flood of
+  AI-generated submissions. Daniel Stenberg put the historical rate at
+  "somewhere north of 15% of the submissions ending up confirmed
+  vulnerabilities"; in 2025 "the confirmed-rate plummeted to below 5%. Not even
+  one in twenty was *real*." Reports moved to GitHub, which he announced on 25
+  February had been a mistake; HackerOne intake resumed on 1 March, with no
+  money attached.
 - **Linux kernel** networking maintainer Jakub Kicinski, in a pull request:
   "We are completely overwhelmed." Security advisories per kernel release went
   from roughly 500 to a projected 2,000.
-- **JFrog** found 55 advisories filed by a single account in July. 54 were
-  fabricated. One had already been scored 10.0 Critical by Red Hat. Every one
-  of them cited functions that don't exist or line numbers past the end of the
-  file.
+- **JFrog** found 55 advisories filed by a single GitHub account in late July
+  2026. 54 were fabricated; the 55th was a real bug wrapped in unverified
+  metadata. One had already been scored 10.0 Critical by Red Hat — since
+  downgraded to 7.6 — and had reached the National Vulnerability Database. The
+  SQLite fabrication blamed a function that SQLite only added in 2025, a year
+  after the version it supposedly broke.
 
 That last detail is the whole idea. If fake reports cite things that don't
 exist, then a program that checks whether they exist should catch fakes. It's a
@@ -291,9 +297,11 @@ reach — can now skip it, or start from this corpus and prove me wrong.
 What remains open:
 
 - **Execution grounding**, with a large caveat. "I Can't Believe It's Not a
-  Valid Exploit" (arXiv:2602.04165) found that **71.5% of proof-of-concepts an
-  automated harness scored as successful were invalid** — hard-coded outcomes,
-  swallowed exceptions, reimplemented behaviour. Exit codes are forgeable.
+  Valid Exploit" (arXiv:2602.04165) reports that **71.5% of the
+  proof-of-concepts it generated were invalid**, and that of those its harness
+  scored as *successful*, **44% did not exploit the actual vulnerable
+  location** — hard-coded outcomes, swallowed exceptions, reimplemented
+  behaviour, exploitation via legitimate API use. Exit codes are forgeable.
   Proving a PoC actually reached the claimed code path needs instrumentation
   that doesn't exist yet. Anyone attempting it should build on ARVO
   (BSD-2, github.com/n132/ARVO): 6,138 real vulnerabilities as paired
