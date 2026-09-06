@@ -1,5 +1,7 @@
 # slopcheck
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22545408.svg)](https://doi.org/10.5281/zenodo.22545408)
+
 Check whether a vulnerability report's stated facts match the source tree it
 claims to be about.
 
