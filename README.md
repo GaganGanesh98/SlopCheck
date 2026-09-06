@@ -221,10 +221,13 @@ contradiction:
 | confirmed vulnerabilities | **19 / 126** — pure false alarms |
 | archived slop | **5 / 49** — real detections lost |
 
-Close to 4:1 against. Demoting it improves discrimination rather than trading
-it away: the gap to slop *widens* from +10.7 to +15.6 points while false
-contradictions on genuine reports fall from 73.0% to 57.9%. Absolute catch
-rate was never the goal; separation is.
+Close to 4:1 against. Demoting it appeared to improve discrimination rather
+than trade it away: the gap to slop *widened* from +10.7 to +15.6 points while
+false contradictions on genuine reports fell from 73.0% to 57.9%.
+
+That fifteen-point gap is the one later rounds dissolved. All figures in this
+subsection and the next are from that intermediate stage and are superseded by
+the headline table; they are kept because the sequence is the finding.
 
 ### Ablations on the original checks
 
@@ -243,8 +246,9 @@ few points of precision by destroying slop detection.
 
 ### There is no usable threshold
 
-The obvious response to a 57.9% false-contradiction rate is to stop gating on
-"any contradiction" and pick a better threshold. That is testable, so it was
+The obvious response to a false-contradiction rate this high — 57.9% at the
+time this was first run, 29.4% today — is to stop gating on "any
+contradiction" and pick a better threshold. That is testable, so it was
 tested rather than argued about. Sweeping every threshold on three metrics
 across all 557 reports:
 
