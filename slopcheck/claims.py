@@ -207,6 +207,11 @@ def _qualifying_ref(line: str, known_basenames: set[str] | None) -> bool:
     return False
 
 
+# "commit a78a07d3", "commit `a78a07d3`", "commit: \"a78a07d3\"" -- but never
+# ".../commit/a78a07d3", which is a URL into some other project.
+_COMMIT_LABELLED = re.compile(r"\bcommits?\b[\s:=]*[`'\"(\[]*\s*$", re.I)
+
+
 def _strip_diff_prefix(path: str) -> str:
     """`diff --git a/lib/hostip.c b/lib/hostip.c` names one file twice. The
     a/ and b/ are diff syntax; reading them as directories turns every patch
@@ -286,12 +291,17 @@ def extract(text: str, known_basenames: set[str] | None = None) -> list[Claim]:
     # --- commits, CVEs, versions: prose only ------------------------------
     # Inside a fence these are thread ids in a debug log, ASan BuildIds and
     # blob hashes on a diff's index line -- never a commit the reporter named.
+    # Only hashes the report explicitly calls commits. Accepting any 8+ hex
+    # run made this check pure noise: of 41 findings it produced on the curl
+    # corpus, a random sample of 7 was wrong 7 times -- register dumps from
+    # dmesg, a BuildId out of `curl -V`, another project's commit inside a
+    # URL, and a medium.com article slug. The trailing "/" exclusion is what
+    # rejects the URL forms: ".../commit/<hash>" is somebody else's repository.
     for m in _SHA.finditer(prose):
         sha = m.group(1)
         if sha.isdigit():
             continue
-        labelled = re.search(r"commit\s+$", text[: m.start()], re.I)
-        if len(sha) >= 8 or labelled:
+        if _COMMIT_LABELLED.search(text[: m.start()]):
             add(Claim("commit", sha, ctx(m.start())))
 
     for m in _CVE.finditer(prose):

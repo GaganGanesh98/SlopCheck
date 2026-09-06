@@ -153,3 +153,17 @@ def test_frame_symbols_require_a_file_in_this_tree():
     assert "__interceptor_strlen" not in kinds(c, "symbol")
     assert "CRYPTO_strdup" not in kinds(c, "symbol")
     assert not any("openssl_external" in p for p in kinds(c, "path"))
+
+
+def test_commit_claims_need_the_word_commit():
+    """Accepting any 8+ hex run made commit_exists pure noise: register dumps
+    from dmesg, BuildIds out of `curl -V`, article slugs."""
+    noise = "segfault at 5 ip 00007f3a8db8b75d sp 00007ffd419fd958 error 4"
+    assert kinds(extract(noise), "commit") == set()
+    assert "a78a07d3a9" in kinds(extract("see commit `a78a07d3a9`"), "commit")
+
+
+def test_commit_urls_are_not_commit_claims():
+    """.../commit/<hash> is somebody else's repository."""
+    url = "crashes my project: https://example.invalid/x/-/commit/7e0afef3e774497efa29bf581630747cddd95e55"
+    assert kinds(extract(url), "commit") == set()
