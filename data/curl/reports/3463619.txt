@@ -1,8 +1,0 @@
-testing hackerone functions
-
-hi
-team i am testing hackerone functions i need some help of you this is my test account can you blacklist me from your program (not ban) just blacklist
-
-## Impact
-
-thanks

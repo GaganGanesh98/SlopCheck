@@ -106,8 +106,128 @@ def _expand_numbers(blob: str) -> list[str]:
     return _INT.findall(blob)
 
 
-def extract(text: str) -> list[Claim]:
-    """Return de-duplicated claims, in a stable order."""
+# --- who is asserting it --------------------------------------------------
+#
+# A vulnerability report is two documents in one: prose making claims ABOUT the
+# project, and the reporter's own artifacts -- proof-of-concept source, server
+# stubs, build scripts -- which make no claims about the project at all. Their
+# identifiers are absent from the tree by construction, and flagging them
+# produced 60% of every surviving contradiction across the curl corpus.
+#
+# The split is NOT "inside a fence" versus "outside". Stack traces live inside
+# fences 4.5:1 over prose, and a frame naming a function and a file is the
+# single highest-quality claim a report ever makes. What separates them is who
+# is speaking: a frame, a diff header and a path:line are the reporter quoting
+# the project, while the surrounding C and Python is the reporter quoting
+# themselves.
+
+# "#12 0x55cc37b1541c in state_performing /tmp/repro/curl/lib/multi.c:1915:12"
+# "==5247==    by 0x48AF420: push_promise (http2.c:877)"
+# "#8  0x00005555555eae21 in wc_statemach (conn=0x...) at ftp.c:3836"
+_FRAME_LINE = re.compile(
+    r"""^\s*(?:==\d+==\s*)?              # valgrind pid prefix
+        (?: \#\d+\s                      # ASan / gdb frame number
+          | (?:by|at)\s+0x[0-9a-fA-F]+   # valgrind frame
+        )""",
+    re.X,
+)
+# The function name in a frame: "in <name>" (ASan, gdb) or "0xADDR: <name>"
+# (valgrind). These names are never followed directly by "(", so the ordinary
+# _CALL pattern cannot see them.
+_FRAME_SYM = re.compile(
+    r"(?:\bin\s+|0x[0-9a-fA-F]+:\s*)([A-Za-z_][A-Za-z0-9_]{2,})")
+
+# Diff headers name paths and line anchors. Deliberately NOT the "index
+# cea88e668..ddfb65344" line: those are blob hashes, and reading them as commit
+# references produced a contradiction on every single one in the corpus.
+_DIFF_LINE = re.compile(r"^\s*(?:diff --git |--- |\+\+\+ |@@ )")
+
+_BLANK = re.compile(r"[^\n]")
+
+
+def _blank(s: str) -> str:
+    """Same length, same line structure, no content -- so that positions in a
+    masked stream still index into the original text for context."""
+    return _BLANK.sub(" ", s)
+
+
+def _partition(text: str, known_basenames: set[str] | None) -> tuple[str, str, str]:
+    """Split the report into three position-preserving streams.
+
+    prose  -- everything outside fenced blocks; extracted from as before.
+    frames -- fenced lines that are stack frames; paths, lines AND symbols.
+    refs   -- fenced diff headers and path:line references; paths and lines
+              only, never symbols.
+    """
+    spans = [(m.start(), m.end()) for m in _FENCE.finditer(text)]
+    if not spans:
+        return text, _blank(text), _blank(text)
+
+    prose = list(text)
+    frames = list(_blank(text))
+    refs = list(_blank(text))
+
+    for a, b in spans:
+        for ch in range(a, b):
+            prose[ch] = " " if text[ch] != "\n" else "\n"
+        pos = a
+        for line in text[a:b].splitlines(keepends=True):
+            stripped = line.rstrip("\n")
+            # A frame yields its function name only when the frame itself
+            # names a file in THIS tree. curl links OpenSSL, glibc, wolfSSL
+            # and libssh2, and an ASan trace is mostly not curl frames:
+            # "#0 in __asan_memcpy" and "in CRYPTO_zalloc .../crypto/mem.c"
+            # are the sanitiser and the TLS library talking about themselves.
+            if _FRAME_LINE.search(stripped) and _qualifying_ref(stripped, known_basenames):
+                dest = frames
+            elif _DIFF_LINE.search(stripped) or _qualifying_ref(stripped, known_basenames):
+                dest = refs
+            else:
+                dest = None
+            if dest is not None:
+                for i, ch in enumerate(line):
+                    dest[pos + i] = ch
+            pos += len(line)
+
+    return "".join(prose), "".join(frames), "".join(refs)
+
+
+def _qualifying_ref(line: str, known_basenames: set[str] | None) -> bool:
+    """A 'path:line' whose basename really is a file in the tree.
+
+    Without a tree to consult we accept it: the checks downstream still have to
+    agree, and over-extraction here costs recall in the transcript, not a false
+    CONTRADICTED.
+    """
+    for m in _PATH_LINE.finditer(line):
+        if known_basenames is None:
+            return True
+        if m.group(1).rsplit("/", 1)[-1] in known_basenames:
+            return True
+    return False
+
+
+def _strip_diff_prefix(path: str) -> str:
+    """`diff --git a/lib/hostip.c b/lib/hostip.c` names one file twice. The
+    a/ and b/ are diff syntax; reading them as directories turns every patch
+    in a report into a wrong-directory contradiction."""
+    return path[2:] if path[:2] in ("a/", "b/") else path
+
+
+def _is_hexish(name: str) -> bool:
+    """An abbreviated object hash the reporter cited correctly. Every one of
+    the 42 distinct hex 'symbols' in the curl corpus resolved to a real commit,
+    and every one was reported as a nonexistent identifier."""
+    return bool(re.fullmatch(r"[0-9a-f]{7,40}", name)) and not name.isdigit()
+
+
+def extract(text: str, known_basenames: set[str] | None = None) -> list[Claim]:
+    """Return de-duplicated claims, in a stable order.
+
+    `known_basenames` -- the set of file basenames present in the target tree,
+    when one is available. Used only to recognise a path:line reference inside
+    a fenced block; extraction is otherwise independent of the tree.
+    """
     out: list[Claim] = []
     seen: set[tuple] = set()
 
@@ -116,56 +236,74 @@ def extract(text: str) -> list[Claim]:
             seen.add(c.key())
             out.append(c)
 
-    # file:line pairs bind a line number to a specific file -- strongest form
-    for m in _PATH_LINE.finditer(text):
-        path, line = m.group(1), m.group(2)
-        add(Claim("path", path, _sentence_around(text, m.start())))
-        add(Claim("line", line, _sentence_around(text, m.start()), {"path": path}))
+    prose, frames, refs = _partition(text, known_basenames)
 
-    paths = [m.group(1) for m in _PATH.finditer(text)]
-    for m in _PATH.finditer(text):
-        add(Claim("path", m.group(1), _sentence_around(text, m.start())))
+    def ctx(pos: int) -> str:
+        return _sentence_around(text, pos)
 
-    # bare "line N" claims attach to the nearest preceding path, if any
-    for m in _LINE_WORD.finditer(text):
-        prior = [p for p in _PATH.finditer(text[: m.start()])]
-        path = prior[-1].group(1) if prior else ""
-        for n in _expand_numbers(m.group(1)):
-            add(Claim("line", n, _sentence_around(text, m.start()),
-                      {"path": path} if path else {}))
+    # --- paths and line numbers: prose, frames and diff/ref lines ----------
+    for stream in (prose, frames, refs):
+        for m in _PATH_LINE.finditer(stream):
+            path, line = _strip_diff_prefix(m.group(1)), m.group(2)
+            add(Claim("path", path, ctx(m.start())))
+            add(Claim("line", line, ctx(m.start()), {"path": path}))
 
+        for m in _PATH.finditer(stream):
+            add(Claim("path", _strip_diff_prefix(m.group(1)), ctx(m.start())))
+
+        # bare "line N" attaches to the nearest preceding path IN THE SAME
+        # stream, so a fenced frame cannot bind itself to a prose filename.
+        for m in _LINE_WORD.finditer(stream):
+            prior = [p for p in _PATH.finditer(stream[: m.start()])]
+            path = prior[-1].group(1) if prior else ""
+            for n in _expand_numbers(m.group(1)):
+                add(Claim("line", n, ctx(m.start()),
+                          {"path": path} if path else {}))
+
+    # --- symbols: prose as before, plus the function names in stack frames --
     symbols: set[str] = set()
-    for pat in (_LABELLED, _TICKED, _CALL):
-        for m in pat.finditer(text):
-            name = m.group(1)
-            low = name.lower()
-            if low in _STOPWORDS or low in _STDLIB or name.isdigit():
-                continue
-            if not _looks_like_code(name):
-                continue
-            if name not in symbols:
-                symbols.add(name)
-                add(Claim("symbol", name, _sentence_around(text, m.start())))
 
-    for m in _SHA.finditer(text):
+    def add_symbol(name: str, pos: int) -> None:
+        low = name.lower()
+        if low in _STOPWORDS or low in _STDLIB or name.isdigit():
+            return
+        if _is_hexish(name):
+            return
+        if not _looks_like_code(name):
+            return
+        if name in symbols:
+            return
+        symbols.add(name)
+        add(Claim("symbol", name, ctx(pos)))
+
+    for pat in (_LABELLED, _TICKED, _CALL):
+        for m in pat.finditer(prose):
+            add_symbol(m.group(1), m.start())
+    for pat in (_FRAME_SYM, _LABELLED, _TICKED, _CALL):
+        for m in pat.finditer(frames):
+            add_symbol(m.group(1), m.start())
+
+    # --- commits, CVEs, versions: prose only ------------------------------
+    # Inside a fence these are thread ids in a debug log, ASan BuildIds and
+    # blob hashes on a diff's index line -- never a commit the reporter named.
+    for m in _SHA.finditer(prose):
         sha = m.group(1)
-        # Pure digits are register dumps, timestamps and Suricata sids, not
-        # commit hashes. Require at least one hex letter, and 8+ chars unless
-        # the word "commit" immediately precedes it.
         if sha.isdigit():
             continue
         labelled = re.search(r"commit\s+$", text[: m.start()], re.I)
         if len(sha) >= 8 or labelled:
-            add(Claim("commit", sha, _sentence_around(text, m.start())))
+            add(Claim("commit", sha, ctx(m.start())))
 
-    for m in _CVE.finditer(text):
-        add(Claim("cve", m.group(0).upper(), _sentence_around(text, m.start())))
+    for m in _CVE.finditer(prose):
+        add(Claim("cve", m.group(0).upper(), ctx(m.start())))
 
-    for m in _VERSION.finditer(text):
+    for m in _VERSION.finditer(prose):
         if m.group(1).count(".") > 2:
             continue  # dotted quad or longer: an address, not a version
-        add(Claim("version", m.group(1), _sentence_around(text, m.start())))
+        add(Claim("version", m.group(1), ctx(m.start())))
 
+    # Snippets come from the whole document: a fenced block is a snippet
+    # regardless of who wrote it, and snippet_present never contradicts.
     for m in _FENCE.finditer(text):
         body = m.group(1).strip()
         if 20 < len(body) < 4000:

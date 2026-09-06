@@ -125,6 +125,27 @@ class Tree:
         """Paths in the tree whose tail matches, e.g. 'os400sys.c'."""
         return sorted(self._ref_index(self.ref)[1].get(path.split("/")[-1], []))
 
+    def basenames(self) -> set[str]:
+        """Every file basename at this ref. Lets the claim extractor tell a
+        real path:line reference from an arbitrary colon-separated token."""
+        return set(self._ref_index(self.ref)[1])
+
+    def resolve_path(self, path: str) -> str | None:
+        """Bind a reported path to a real one.
+
+        Stack traces carry the reporter's build directory --
+        /tmp/repro/curl/lib/multi.c, /root/curl/build-afl/src/../../src/... --
+        and valgrind prints bare basenames. Neither is a claim that the project
+        ships that path; both name a file that is really there.
+        """
+        if path in self.files:
+            return path
+        cands = self.find_paths_ending(path)
+        if len(cands) == 1:
+            return cands[0]
+        suffix = [c for c in cands if path.endswith(c)]
+        return suffix[0] if len(suffix) == 1 else None
+
     def blob(self, path: str) -> str | None:
         def read():
             p = self._git("show", f"{self.ref}:{path}")
@@ -405,6 +426,25 @@ def check_path(t: Tree, c: Claim) -> Finding:
     note, downgrade = t.path_history_note(c.value)
     near = t.find_paths_ending(c.value)
     if near:
+        # Three different things hide behind "a file of that name is elsewhere",
+        # and only the third is a disagreement.
+        #
+        # The reported path ENDS WITH a real one: a build-directory prefix in
+        # front of a file that is present (/tmp/repro/curl/lib/multi.c). The
+        # tree agrees; the prefix is local to the reporter's machine.
+        exact = [p for p in near if c.value.endswith(p)]
+        if exact:
+            return Finding(c.kind, c.value, "file_exists", CONSISTENT,
+                           f"present at {exact[0]}; the reported path carries a "
+                           f"build-directory prefix", c.context)
+        # A bare basename, as valgrind and gdb print them (ftp.c). No directory
+        # was asserted, so there is no directory to disagree with.
+        if "/" not in c.value:
+            return Finding(c.kind, c.value, "file_exists", CONSISTENT,
+                           f"present at {', '.join(near[:4])}; the report names "
+                           f"the file without a directory", c.context)
+        # A directory WAS asserted, and the file has never been in it. This is
+        # the finding the tool exists to surface, and it stays.
         return Finding(
             c.kind, c.value, "file_exists", UNCHECKABLE if downgrade else CONTRADICTED,
             f"no such path at {t.ref}; a file with that name exists elsewhere: "
@@ -432,21 +472,42 @@ def check_line(t: Tree, c: Claim) -> Finding:
     if not path:
         return Finding(c.kind, c.value, "line_in_range", UNCHECKABLE,
                        "line number not bound to a file in the report", c.context)
-    n = t.line_count(path)
+    resolved = t.resolve_path(path)
+    if resolved is None:
+        # Not reading the file is a statement about this tool's reach, not
+        # about the tree. 602 of 625 contradictions in the curl corpus were
+        # this, and every one of them was wrong -- the same semantic point
+        # already settled for snippet_present.
+        return Finding(c.kind, c.value, "line_in_range", UNCHECKABLE,
+                       f"cannot bind {path} to a file in the tree at {t.ref}, "
+                       f"so the line number cannot be checked", c.context)
+    n = t.line_count(resolved)
     if n is None:
-        return Finding(c.kind, c.value, "line_in_range", CONTRADICTED,
-                       f"cannot read {path} at {t.ref} (file absent)", c.context)
+        return Finding(c.kind, c.value, "line_in_range", UNCHECKABLE,
+                       f"cannot read {resolved} at {t.ref}", c.context)
+    via = "" if resolved == path else f" (reported as {path})"
     if int(c.value) > n:
         return Finding(c.kind, c.value, "line_in_range", CONTRADICTED,
-                       f"{path} is {n} lines long at {t.ref}; line {c.value} does not exist",
-                       c.context)
+                       f"{resolved} is {n} lines long at {t.ref}{via}; "
+                       f"line {c.value} does not exist", c.context)
     return Finding(c.kind, c.value, "line_in_range", CONSISTENT,
-                   f"{path} has {n} lines at {t.ref}", c.context)
+                   f"{resolved} has {n} lines at {t.ref}{via}", c.context)
+
+
+_HEXISH = re.compile(r"[0-9a-f]{7,40}")
 
 
 def check_symbol(t: Tree, c: Claim) -> Finding:
     hits = t.grep_word(c.value)
     if not hits:
+        # A short hex run that resolves is an object the reporter cited
+        # correctly, not an identifier they invented. The extractor now
+        # declines to emit these; this is the second line of defence, and it
+        # answers rather than staying silent.
+        if _HEXISH.fullmatch(c.value) and t.commit_exists(c.value):
+            return Finding(c.kind, c.value, "symbol_exists", CONSISTENT,
+                           "not an identifier: this is a commit in this "
+                           "repository", c.context)
         note = t.history_note(c.value)
         # If it exists at a recent release, this is a stale-ref problem, not a
         # fabricated symbol. Downgrading is the honest call.

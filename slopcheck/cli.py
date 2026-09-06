@@ -33,7 +33,20 @@ def main(argv: list[str] | None = None) -> int:
     text = sys.stdin.read() if args.report == "-" else Path(args.report).read_text(
         encoding="utf-8", errors="replace")
 
-    claims = extract(text)
+    # The tree is built first when we have one: the extractor consults its
+    # basenames to tell a real path:line reference inside a fenced block from
+    # the reporter's own code. Without --repo it falls back to accepting them,
+    # which costs recall in the transcript and nothing in correctness.
+    tree = None
+    if args.repo:
+        tree = Tree(args.repo, args.ref)
+        commit = tree.resolve_ref()
+        if commit is None:
+            print(f"error: cannot resolve ref '{args.ref}' in {args.repo}",
+                  file=sys.stderr)
+            return 2
+
+    claims = extract(text, tree.basenames() if tree else None)
     if args.claims_only:
         for c in claims:
             print(f"{c.kind:9s} {c.value[:80]}"
@@ -41,14 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{len(claims)} claims: {summarise(claims)}", file=sys.stderr)
         return 0
 
-    if not args.repo:
+    if tree is None:
         print("error: --repo is required unless --claims-only is given", file=sys.stderr)
-        return 2
-
-    tree = Tree(args.repo, args.ref)
-    commit = tree.resolve_ref()
-    if commit is None:
-        print(f"error: cannot resolve ref '{args.ref}' in {args.repo}", file=sys.stderr)
         return 2
 
     findings = run(tree, claims)
