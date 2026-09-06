@@ -12,6 +12,7 @@ authors:
   - family-names: Ganesh
     given-names: Gagan
 version: "1.0-negative-result"
+doi: 10.5281/zenodo.22545408
 date-released: 2026-09-06
 url: "https://github.com/GaganGanesh98/SlopCheck"
 license: MIT
