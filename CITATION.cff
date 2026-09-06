@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this corpus or result, please cite it as below."
+title: "SlopCheck: a labelled corpus of 557 curl security reports and a negative result on source-tree grounding"
+abstract: >-
+  A labelled corpus of 557 publicly disclosed curl security reports (126
+  maintainer-confirmed vulnerabilities, 49 from curl's published AI-slop
+  archive), and a measurement showing that grounding a vulnerability report's
+  stated facts against the project's source tree does not separate genuine
+  reports from fabricated ones. The finished checker scores Youden J = 0.083
+  against a median noise floor of 0.092.
+authors:
+  - family-names: Ganesh
+    given-names: Gagan
+version: "1.0-negative-result"
+date-released: 2026-09-06
+url: "https://github.com/GaganGanesh98/SlopCheck"
+license: MIT
+keywords:
+  - vulnerability-reports
+  - open-source-maintenance
+  - negative-results
+  - dataset
+  - software-security
