@@ -38,7 +38,7 @@ directory into `projects`"). Checking against HEAD alone called a truthful
 line fabricated. A tool that does that to a reporter deserves to be ignored.
 
 **Before reading further: measured across all 557 publicly disclosed curl
-reports, this tool contradicts 32.5% of confirmed vulnerabilities, and 7.5% of
+reports, this tool contradicts 29.4% of confirmed vulnerabilities, and 10% of
 its individual contradictions are correct.** It does not work as a gate, and it
 does not yet work as an annotator either. See [Measured
 behaviour](#measured-behaviour) — that section is the honest summary of what
@@ -158,19 +158,19 @@ disclosures: **557 curl reports — 126 confirmed vulnerabilities (`resolved`),
 
 | | n | got ≥1 contradiction |
 |---|---|---|
-| **confirmed vulnerabilities** | 126 | **32.5%** |
+| **confirmed vulnerabilities** | 126 | **29.4%** |
 | archived slop | 49 | 28.6% |
-| unlabelled | 382 | 30.9% |
+| unlabelled | 382 | 24.9% |
 
-**41 of 126 genuine, curl-confirmed vulnerability reports are contradicted —
-and slop is contradicted slightly *less* often than they are.** The separation
-between real and fake is negative. As a gate — "any contradiction means look
-here" — that is not merely useless, it points the wrong way.
+**37 of 126 genuine, curl-confirmed vulnerability reports are contradicted —
+and slop is contradicted no more often than they are.** The separation between
+real and fake is negative. As a gate — "any contradiction means look here" —
+that is not merely useless, it points the wrong way.
 
-Earlier revisions of this tool showed 57.9% against 73.5%, a fifteen-point gap
-that looked like weak-but-real signal. It was not. Removing four classes of
-extraction bug (below) cut total contradictions from 1,859 to 336 and took the
-gap with them, which is what a gap made of noise does when the noise goes.
+Earlier revisions showed 57.9% against 73.5%, a fifteen-point gap that looked
+like weak-but-real signal. It was not. Six classes of extraction bug (below)
+were removed, cutting total contradictions from 1,859 to 264, and the gap went
+with them. That is what a gap made of noise does when the noise goes.
 
 ### It is not the stale-ref problem
 
@@ -250,15 +250,19 @@ across all 557 reports:
 
 | metric | best threshold | genuine FP | slop caught | Youden J |
 |---|---|---|---|---|
-| contradiction count | ≥ 7 | 0.8% | 2.0% | 0.012 |
-| contradicted / consistent | ≥ 0.25 | 15.1% | 22.4% | 0.074 |
-| contradicted / claims | ≥ 0.2 | 8.7% | 16.3% | **0.076** |
+| contradiction count | ≥ 2 | 11.9% | 14.3% | 0.024 |
+| contradicted / consistent | ≥ 0.1 | 18.3% | 26.5% | **0.083** |
+| contradicted / claims | ≥ 0.2 | 9.5% | 16.3% | 0.068 |
 
 Youden's J is `sensitivity + specificity - 1`: **J = 0 is a coin flip, J = 1 is
-perfect.** The best result anywhere in the sweep is 0.076. At the natural
-operating point — any contradiction at all — J is **−0.040**: worse than a coin
-flip. On the pre-fix pipeline the best J was 0.155, so fixing the tool halved
-what little separation there was.
+perfect.** The best result anywhere in the sweep is 0.083. At the natural
+operating point — any contradiction at all — J is **−0.008**.
+
+For scale: a randomly generated feature, swept the same way at the same class
+sizes (n = 126 / 49), reaches a median best-J of **0.092**. The tool separates
+real from fake slightly *worse* than the median coin flip. And it got there by
+being fixed: the pre-fix pipeline scored 0.155, so most of the apparent signal
+was the noise.
 
 Every operating point with a false-alarm rate a maintainer would tolerate is
 worthless:
@@ -272,7 +276,7 @@ Get the false alarms down to something honest and you catch roughly one slop
 report in twelve. The aggregate signal is not in the data, so this is not a
 tuning problem and no threshold fixes it.
 
-### Per-finding accuracy: 7.5%
+### Per-finding accuracy: 10%
 
 "The aggregate carries no signal, but individual findings are useful" was this
 project's fallback position for a while. It is measurable, so it was measured
@@ -285,28 +289,41 @@ Three samples of 40, each drawn fresh at random after the pipeline changed:
 |---|---:|---:|
 | as originally shipped | 1,859 | 1 (2.5%) |
 | + three mechanical fixes | 471 | 3 (7.5%) |
-| + provenance rules | **336** | **3 (7.5%)** |
+| + provenance rules | 336 | 3 (7.5%) |
+| + line stale-ref, commit guard | **264** | **4 (10%)** |
 
-Eighty-two percent of the noise is gone and the precision did not move. Twelve
-wrong findings per correct one is not an annotator a maintainer would read
-twice, and it is not one a reporter would run either.
+**Eighty-six percent of the output is gone and the precision did not move.**
+That is the result, and it is stronger than any of the four numbers alone. Had
+the residual been more enumerable bugs, removing six-sevenths of the output
+would have concentrated the correct findings; instead each fix removed right
+and wrong alike, in proportion. Nine wrong findings per correct one is not an
+annotator a maintainer would read twice, and not one a reporter would run
+twice either.
+
+(Two of the four correct findings in the last sample come from a single slop
+report, so they are not independent.)
 
 What the wrong findings are, in the final sample:
 
 | cause | share |
 |---|---:|
-| stale ref — the code moved or was removed since the report | 30% |
-| third-party API (OpenSSL, wolfSSL, GnuTLS, Apple Security, SMB) | 20% |
-| hex that is not a commit (register dumps, BuildIds, URL slugs) | 17.5% |
-| the reporter's own PoC files and classes, unfenced | 15% |
-| proposals and prose nouns | 7.5% |
-| include path read as a repo path (`curl/curl.h`) | 5% |
+| the reporter's own artifacts and prose nouns, in unfenced text | 35% |
+| third-party API (OpenSSL, wolfSSL, GnuTLS, glibc, Apple Security) | 20% |
+| stale ref beyond the 14-release probe window | 15% |
+| a bare `line N` bound to the wrong nearby path | 10% |
+| path shape — an include path or a path missing its `lib/` prefix | 5% |
+| a real symbol cited with the wrong case (`curl_cookie_getlist`) | 2.5% |
 
-The largest class is now the stale ref, and the line axis has no stale-ref
-downgrade at all — `lib/url.c` has shrunk from 4,086 lines to 2,600, so every
-report that correctly cited a line in the old file is now contradicted. That is
-the next thing worth fixing, and it is the first time it has been the largest
-thing.
+Two specific defects visible in that sample, left unfixed deliberately:
+`vauth/ntlm.c` contradicts because the suffix test runs one way only and the
+report merely dropped the `lib/`; and an OpenSSL stack frame passed the
+project-frame test because the line happens to mention `digest.c`, which
+collides with curl's `lib/vauth/digest.c`.
+
+Both are enumerable and both are patchable, which is the point. Six rounds of
+exactly this produced no movement in precision. The seventh will not either,
+and continuing to enumerate them is how a negative result gets talked out of
+existence one plausible fix at a time.
 
 ### The artefact that says it best
 
@@ -321,10 +338,29 @@ agreeing with the first one is reported as disagreement.
 
 ### What this means
 
-The binary gate is dead, and not as a matter of taste — the sweep above settles
-it. The annotator is not yet alive: at 7.5% per-finding precision it cannot be
-put in front of a maintainer or a reporter. Both claims are now measurements
-rather than positions, which is the only real thing this repository has.
+Three deployments were considered for this tool, and the measurements close all
+three:
+
+- **A gate for maintainers.** Dead. The sweep settles it, and the separation is
+  now negative.
+- **An annotator for maintainers.** Dead. At 10% per-finding precision a
+  maintainer reads nine wrong findings per useful one.
+- **A linter for reporters, run before submission.** This was the strongest
+  remaining argument: a false alarm costs the author ten seconds because it is
+  *their* claim being questioned, so a high false-alarm rate might be
+  affordable. That argument assumed the findings were individually
+  mostly-right. At nine wrong per correct, a reporter runs it once, sees a
+  dozen bogus complaints about their own PoC and about OpenSSL's API, and never
+  runs it again. The economics do not hold at this precision.
+
+That is not three failures. It is one failure, correctly located: **the tool
+cannot tell which parts of a report are claims about the project.** Prose,
+proof-of-concept source, third-party stack frames and the reporter's own build
+paths all read alike to a static extractor, and the checks downstream are only
+as good as that distinction.
+
+The polarity artefact above is the clearest single illustration of it, and is
+worth more than any of the tables here.
 
 Caveats that limit every number above: all reports were scored against one ref
 (HEAD), so this is a lower bound on precision; the slop label is membership in
@@ -339,6 +375,12 @@ parties and published under HackerOne's terms, not this repository's licence.
 What is committed is the index — ids, labels, substates, CVE ids, URLs — plus
 the fetcher that reconstructs the text, which is the ordinary arrangement for a
 scraped corpus: fully reproducible, nothing redistributed.
+
+They were committed in earlier revisions and remain in this repository's git
+history. That was left alone deliberately. The content is curl's own publicly
+disclosed reports, already published and attributed on HackerOne; rewriting
+public history would break every existing clone to remove something that is a
+`git clone` away from its actual source.
 
 ```bash
 python3 fetch_curl_corpus.py --out data/curl        # ~10 min, rate limited, resumable

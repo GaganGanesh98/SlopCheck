@@ -98,3 +98,43 @@ def test_commit_hash_is_not_a_fabricated_symbol(tree, repo):
     f = check_symbol(tree, Claim("symbol", sha, "ctx"))
     assert f.verdict == CONSISTENT
     assert "commit" in f.observed
+
+
+def test_line_past_eof_downgrades_when_the_file_used_to_be_longer(tmp_path):
+    """The symbol and path axes have had the stale-ref downgrade since early
+    on; the line axis went without it. lib/url.c has gone from 4,086 lines to
+    2,600, so every report correctly citing a line in the old file was being
+    contradicted."""
+    d = tmp_path / "shrink"
+    (d / "lib").mkdir(parents=True)
+    long = "".join(f"/* {i} */\n" for i in range(400))
+    (d / "lib" / "url.c").write_text(long)
+    _git(d, "init", "-q", ".")
+    _git(d, "config", "user.email", "t@t")
+    _git(d, "config", "user.name", "t")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-qm", "big")
+    for tag in ("proj-8_0_0", "proj-8_1_0", "proj-8_2_0"):
+        _git(d, "tag", "-a", "-m", "r", tag)
+    (d / "lib" / "url.c").write_text("".join(f"/* {i} */\n" for i in range(100)))
+    _git(d, "add", "-A")
+    _git(d, "commit", "-qm", "shrunk")
+
+    t = Tree(str(d), "HEAD")
+    f = check_line(t, ln("350", "lib/url.c"))
+    assert f.verdict == UNCHECKABLE
+    assert "--ref" in f.observed
+
+
+def test_line_never_valid_still_contradicts(tmp_path):
+    d = tmp_path / "stable"
+    (d / "lib").mkdir(parents=True)
+    (d / "lib" / "url.c").write_text("".join(f"/* {i} */\n" for i in range(100)))
+    _git(d, "init", "-q", ".")
+    _git(d, "config", "user.email", "t@t")
+    _git(d, "config", "user.name", "t")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-qm", "only")
+    _git(d, "tag", "-a", "-m", "r", "proj-8_0_0")
+    f = check_line(Tree(str(d), "HEAD"), ln("9000", "lib/url.c"))
+    assert f.verdict == CONTRADICTED

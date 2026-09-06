@@ -354,6 +354,42 @@ class Tree:
     def files_ending_in_ref(self, tail: str, ref: str) -> list[str]:
         return self._ref_index(ref)[1].get(tail, [])
 
+    def line_count_in_ref(self, path: str, ref: str) -> int | None:
+        def read():
+            p = self._git("show", f"{ref}:{path}")
+            return p.stdout.count("\n") + 1 if p.returncode == 0 else None
+        return self.cache.get(("lines", self.repo, ref, path), read)
+
+    def line_history_note(self, path: str, lineno: int) -> tuple[str, bool]:
+        """History context for a line claim. Returns (note, should_downgrade).
+
+        The symbol and path axes have had this since early on; the line axis
+        went without it, and that asymmetry became the largest single source of
+        false contradictions once the extraction bugs were gone. Files shrink:
+        lib/url.c has gone from 4,086 lines to 2,600, so every report that
+        correctly cited a line in the old file is contradicted at HEAD.
+
+        A file long enough at a recent release is a stale ref, not a fabricated
+        line number.
+        """
+        if self._history_budget <= 0:
+            return "", False
+        self._history_budget -= 1
+        tail = path.rsplit("/", 1)[-1]
+        for t in self.recent_tags():
+            at = path if self.path_in_ref(path, t) else None
+            if at is None:
+                elsewhere = self.files_ending_in_ref(tail, t)
+                at = elsewhere[0] if elsewhere else None
+            if at is None:
+                continue
+            n = self.line_count_in_ref(at, t)
+            if n is not None and lineno <= n:
+                return (f" — but {at} had {n} lines at {t}, so the report may "
+                        f"describe an older release; re-run with --ref set to "
+                        f"the version the reporter named"), True
+        return "", False
+
     def path_history_note(self, path: str) -> tuple[str, bool]:
         """History context for a path claim. Returns (note, should_downgrade).
 
@@ -487,9 +523,11 @@ def check_line(t: Tree, c: Claim) -> Finding:
                        f"cannot read {resolved} at {t.ref}", c.context)
     via = "" if resolved == path else f" (reported as {path})"
     if int(c.value) > n:
-        return Finding(c.kind, c.value, "line_in_range", CONTRADICTED,
+        note, downgrade = t.line_history_note(resolved, int(c.value))
+        return Finding(c.kind, c.value, "line_in_range",
+                       UNCHECKABLE if downgrade else CONTRADICTED,
                        f"{resolved} is {n} lines long at {t.ref}{via}; "
-                       f"line {c.value} does not exist", c.context)
+                       f"line {c.value} does not exist" + note, c.context)
     return Finding(c.kind, c.value, "line_in_range", CONSISTENT,
                    f"{resolved} has {n} lines at {t.ref}{via}", c.context)
 
